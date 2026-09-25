@@ -13,6 +13,7 @@ The lab progressed through four main stages:
 3. Generate controlled phishing and adversary-in-the-middle (AiTM) activity and investigate the resulting telemetry.
 4. Introduce a phishing-resistant passkey policy and repeat the authentication flow to validate the defence.
 
+
 ---
 
 ## Architecture
@@ -98,7 +99,7 @@ The Ubuntu server `vm-web01` provided a second operating system and a deliberate
 
 Their purpose was to make the range a broader security environment rather than a collection of client machines.
 
-They also demonstrated an important architectural difference: **clients were onboarded to Defender for Endpoint through Intune, while the servers were onboarded through Defender for Cloud / Defender for Servers Plan 2.**
+They also demonstrated an important architectural difference: clients were onboarded to Defender for Endpoint through Intune, while the servers were onboarded through Defender for Cloud / Defender for Servers Plan 2.
 
 ---
 
@@ -204,7 +205,7 @@ Microsoft Defender XDR
 
 ### Verification
 
-After onboarding completed, **all six workloads appeared in the Defender XDR device inventory**.
+After onboarding completed,all six workloads appeared in the Defender XDR device inventory.
 
 ![Defender XDR Device Inventory](images/defender-device-inventory.png)
 
@@ -222,6 +223,7 @@ The dedicated test account ```aitm-target@schnitz.onmicrosoft.com``` has a Micro
 
 This account was sent a credential harvesting email disguised as an urgent TESCO account suspension email. I pretended to not know any better and clicked the link, which took me to a spoofed TESCO login page. Once a set of fake credentials were inputted, we were met with:
 
+![Phishing email](images/phishing-email.png)
 ![A message stating that my credentials were phished](images/phishing-victim.png)
 
 The simulation generated the email-side phishing telemetry and provided a controlled way to observe how Microsoft 365 recorded user interaction with a phishing scenario.
@@ -234,6 +236,8 @@ This was useful as an initial exercise, but it was different from the identity a
 
 ## 5. AiTM Identity Attack
 
+![Overview of the identity attack flow](images/attack-flow.png)
+
 ### Evilginx Introduction
 
 Evilginx is an Adversary-in-the-Middle (AiTM) phishing framework that operates as a reverse proxy between a target user and a legitimate authentication service. Rather than presenting a completely separate fake login page, it proxies the real sign-in flow to the user.
@@ -242,7 +246,7 @@ When the user enters their credentials and completes a supported MFA challenge, 
 
 ### Priming Evilginx
 
-I created a **separate attacker resource group and an attacker Ubuntu VM**. Keeping the attacker infrastructure separate from the main cyber range helped isolate the offensive component from the normal client and server workloads.
+I created a separate attacker resource group and an attacker Ubuntu VM. Keeping the attacker infrastructure separate from the main cyber range helped isolate the offensive component from the normal client and server workloads.
 
 The attacker VM was assigned a public IP address and configured to accept inbound HTTP and HTTPS traffic so that the lab domain could resolve to the Evilginx reverse proxy and the lure could be accessed from the test client. I also permitted inbound SSH access so I could remotely administer the VM and configure the Evilginx environment.
 
@@ -296,7 +300,8 @@ Defender XDR subsequently generated two significant alerts:
 - **User compromised through session cookie hijack** — High severity
 - **Anomalous Token** — Medium severity
 
-![Defender XDR AiTM Alerts](images/defender-aitm-alerts.png)
+![Defender XDR AiTM Alerts](images/defender-aitm-alerts-1.png)
+![Defender XDR AiTM Alerts](images/defender-aitm-alerts-2.png)
 
 The session-cookie hijack alert reported that an active user session had been observed across environments with inconsistent network, location or user-agent attributes, indicating possible unauthorised session reuse. The related event timeline showed the test account accessing OfficeHome from 194.233.86.187, with the source geolocated to Singapore. This alert corresponded to the same sign-in previously identified by Entra ID Protection. The matching sign-in request ID, `8c0b1c3a-5064-4385-97db-d5859aea6c00`, provided a direct correlation between the Entra and Defender XDR detections, confirming that both alerts referred to the same sign-in event rather than being associated only because they involved the same account and source IP address.
 
@@ -378,3 +383,73 @@ This result was important because it demonstrated the difference between ordinar
 The defence did not depend on recognising a stolen session after the fact. Instead, the authentication flow itself required a credential that could not simply be relayed through the AiTM proxy.
 
 ---
+
+## Results
+
+| Validation | Result |
+| --- | --- |
+| Azure client/server estate deployed | 6 workloads |
+| Windows clients Entra joined and Intune managed | Successful |
+| Clients onboarded to Defender for Endpoint | Successful |
+| Servers onboarded through Defender for Cloud | Successful |
+| All workloads visible in Defender XDR | Successful |
+| Endpoint detection tests generated alerts | Successful |
+| Phishing simulation telemetry generated | Successful |
+| Identity/session-risk activity detected | Successful |
+| Defender XDR surfaced session-related alerts | Successful |
+| Advanced Hunting used to investigate session activity | Successful |
+| Phishing-resistant passkey policy applied | Successful |
+| Re-test failed to satisfy phishing-resistant MFA | Successful |
+
+---
+
+## Skills Demonstrated
+
+- Microsoft Azure administration
+- Azure networking and workload segmentation
+- Azure Bastion and private workload management
+- Microsoft Defender XDR
+- Microsoft Defender for Endpoint
+- Microsoft Defender for Cloud
+- Microsoft Sentinel
+- Microsoft Entra ID and Identity Protection
+- Microsoft Intune
+- Conditional Access
+- Passkeys / phishing-resistant MFA
+- KQL and Advanced Hunting
+- Endpoint telemetry validation
+- Identity and session investigation
+- SIEM/XDR correlation
+- Security architecture documentation
+- Controlled purple-team lab testing
+
+---
+
+## Security and Lab Scope
+
+This project was performed entirely in an isolated lab tenant using dedicated test accounts and workloads.
+
+The deliberately vulnerable application, phishing simulation and AiTM activity were created only for authorised testing within the cyber range. No production accounts or third-party systems were targeted.
+
+Sensitive values such as passwords, authentication cookies, tenant identifiers, subscription identifiers and unnecessary public IP addresses are intentionally omitted from this repository.
+
+---
+
+## References
+
+This project was based on and adapted from the **Mad Hat Cyber Range — Build & Detect Runbook**:
+
+- [Mad Hat Cyber Range Guide](https://madhat.io/pages/cyber-range-guide)
+
+Additional product behaviour was validated using Microsoft documentation for:
+
+- Microsoft Defender XDR
+- Microsoft Sentinel
+- Microsoft Defender for Endpoint
+- Microsoft Defender for Cloud
+- Microsoft Entra ID Protection
+- Microsoft Intune
+- Conditional Access and authentication strengths
+- Passkeys / FIDO2
+
+The implementation, troubleshooting, screenshots, investigation and analysis in this repository reflect my own execution of the lab.
