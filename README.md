@@ -1,5 +1,41 @@
 # Microsoft Cyber Range — Defender XDR, Sentinel & Identity Protection
 
+## Table of Contents
+ 
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Technologies](#technologies)
+- [1. Building the Azure Range](#1-building-the-azure-range)
+  - [Workloads](#workloads)
+  - [Why include both servers?](#why-include-both-servers)
+- [2. Connecting the Security Stack](#2-connecting-the-security-stack)
+  - [Microsoft Sentinel](#microsoft-sentinel)
+  - [Defender for Cloud Apps](#defender-for-cloud-apps)
+  - [Defender for Office 365](#defender-for-office-365)
+  - [Entra ID](#entra-id)
+- [3. Client and Server Onboarding](#3-client-and-server-onboarding)
+  - [Windows 11 clients](#windows-11-clients)
+  - [Server workloads](#server-workloads)
+  - [Verification](#verification)
+- [4. Phishing Simulation](#4-phishing-simulation)
+- [5. AiTM Identity Attack](#5-aitm-identity-attack)
+  - [Evilginx Introduction](#evilginx-introduction)
+  - [Priming Evilginx](#priming-evilginx)
+  - [Phishing the Victim](#phishing-the-victim)
+- [6. Detection and Investigation](#6-detection-and-investigation)
+  - [Entra ID Protection](#entra-id-protection)
+  - [Defender XDR](#defender-xdr)
+  - [Investigation Timeline](#investigation-timeline)
+  - [Mock Analyst Assessment](#mock-analyst-assessment)
+  - [MITRE ATT&CK Mapping](#mitre-attck-mapping)
+- [7. Passkey Defence](#7-passkey-defence)
+  - [Re-testing the authentication flow](#re-testing-the-authentication-flow)
+- [Results](#results)
+- [Skills Demonstrated](#skills-demonstrated)
+- [Security and Lab Scope](#security-and-lab-scope)
+- [References](#references)
+---
+
 ## Overview
 
 This project documents my build and investigation of an isolated Microsoft cloud cyber range using Azure, Microsoft Defender XDR, Microsoft Sentinel, Microsoft Entra ID, Intune and the wider Microsoft security stack.
@@ -18,7 +54,8 @@ The lab progressed through four main stages:
 
 ## Architecture
 
-![Cyber Range Architecture](images/cyber-range-architecture.png)
+![Cyber Range Architecture](images/cyber-range-architecture.svg)
+![Cyber Range Architecture](images/cyber-range-security-wiring.svg)
 
 The environment was built in a dedicated Azure resource group and separated into client and server subnets.
 
@@ -99,7 +136,7 @@ The Ubuntu server `vm-web01` provided a second operating system and a deliberate
 
 Their purpose was to make the range a broader security environment rather than a collection of client machines.
 
-They also demonstrated an important architectural difference: clients were onboarded to Defender for Endpoint through Intune, while the servers were onboarded through Defender for Cloud / Defender for Servers Plan 2.
+They also demonstrated an important architectural difference in security tools and how they are onboarded to them.
 
 ---
 
@@ -236,7 +273,7 @@ This was useful as an initial exercise, but it was different from the identity a
 
 ## 5. AiTM Identity Attack
 
-![Overview of the identity attack flow](images/attack-flow.png)
+<img src="images/attack-flow.svg" alt="Overview of the identity attack flow" width="1000"/>
 
 ### Evilginx Introduction
 
@@ -326,14 +363,23 @@ Defender XDR correlated the abnormal session behaviour and generated the High-se
 
 ### Mock Analyst Assessment
 
-The investigation found evidence consistent with authenticated session reuse following the simulated AiTM attack. The strongest indicators were the change in network/location context, Entra's anomalous-token detections, Defender XDR's session-cookie hijacking alert and the ability to correlate the activity through the same sign-in request identifier.
-
-Because this was a controlled lab, the method used to obtain the session was already known. In a real investigation, the alerts alone would not be sufficient to conclude exactly how the session was compromised. Additional evidence such as endpoint telemetry, browser activity, audit logs and other sign-in events would be required before confirming the full attack chain.
-
-### Advanced Hunting
-
-I also used Advanced Hunting to inspect sign-in telemetry and look for sessions associated with multiple IP addresses.
-
+| Field | Value |
+| --- | --- |
+| Severity | High |
+| Account | `aitm-target@schnitz.onmicrosoft.com` |
+ 
+**Initial triage**
+ 
+Two alerts landed for the same account inside the same window: an Entra ID Protection Anomalous Token detection and a Defender XDR *User compromised through session cookie hijack* alert. Both referenced sign-in activity from 194.233.86.187 (Singapore) - a location inconsistent with the account's normal pattern - and both were tied to the same sign-in request ID. That shared identifier confirmed the two alerts described one event, not two coincidentally related ones.
+ 
+**Working hypothesis**
+ 
+An anomalous-token detection paired with a session-hijack alert, but with no corresponding failed or brand-new sign-in from the suspicious location, pointed toward session or token reuse rather than a fresh credential compromise. The attacker likely never needed the password again because they were reusing an already-authenticated session.
+ 
+**Advanced Hunting: testing the hypothesis**
+ 
+An alert confirms that a detection fired; it doesn't confirm scope. To test the session-reuse hypothesis directly, I queried Entra sign-in telemetry in Advanced Hunting for sessions tied to more than one source IP:
+ 
 ```kusto
 EntraIdSignInEvents
 | where Timestamp > ago(7d)
@@ -347,12 +393,32 @@ EntraIdSignInEvents
     by SessionId
 | where array_length(IPs) > 1
 ```
-
-The query groups activity by session ID and highlights sessions that have been observed from more than one source IP.
-
+ 
+If the account had simply been compromised again with valid credentials, this query would return nothing interesting. A new sign-in creates a new session ID. Instead, it returned a single session ID spread across multiple IP addresses and countries, which is the signature of a stolen session being replayed rather than a fresh authentication.
+ 
 ![Advanced Hunting Session Investigation](images/advanced-hunting.png)
+ 
+> The same session ID appearing across multiple IP addresses is consistent with the controlled session-replay activity performed earlier in the lab, and rules out an independent, credential-based compromise for this specific event.
+ 
+**Conclusion**
+ 
+The shared sign-in request ID, the anomalous-token detections, the session-cookie hijack alert, and the multi-IP session confirmed through hunting all point the same way: authenticated session reuse following the AiTM attack, not a standalone credential compromise.
+ 
+Because this was a controlled lab, the real method (Evilginx cookie theft) was already known going in. In a genuine investigation, this evidence would support the session-hijack conclusion but wouldn't by itself prove *how* the session was obtained. Endpoint telemetry, browser/device detail and the original authentication event would still need reviewing to close out the full attack chain.
+ 
+**Recommended action:** revoke the account's active sessions and refresh tokens, reset its credentials, and reassess whether its current authentication method allows session material to be phished at all, which is exactly what the next stage of this project tests.
 
-> The same session was observed from multiple IP addresses, which was consistent with the controlled session-replay activity performed during the lab.
+### MITRE ATT&CK Mapping
+ 
+| Tactic | Technique | What Happened in the Lab | Detected By |
+| --- | --- | --- | --- |
+| Initial Access | [Phishing: Spearphishing Link (T1566.002)](https://attack.mitre.org/techniques/T1566/002/) | The credential-harvesting email (Section 4) and the Evilginx lure URL (Section 5) were both delivered as a link to the test account. | Defender for Office 365 Attack Simulation report |
+| Credential Access | [Adversary-in-the-Middle (T1557)](https://attack.mitre.org/techniques/T1557/) | Evilginx sat as a reverse proxy between the client and the real Microsoft sign-in page, relaying the authentication flow in both directions. | Not directly observable. This happens on attacker-controlled infrastructure outside the monitored tenant |
+| Credential Access | [Steal Web Session Cookie (T1539)](https://attack.mitre.org/techniques/T1539/) | Evilginx captured the account's credentials and its authenticated session cookie once MFA completed. | Not directly observable - same limitation as above |
+| Defense Evasion, Lateral Movement | [Use Alternate Authentication Material: Web Session Cookie (T1550.004)](https://attack.mitre.org/techniques/T1550/004/) | The captured cookie was imported into a separate browser and reused to access Microsoft 365 as the victim, without a password or a new MFA prompt. | Entra ID Protection - Anomalous Token; Defender XDR - User compromised through session cookie hijack |
+| Initial Access, Persistence, Privilege Escalation, Defense Evasion | [Valid Accounts: Cloud Accounts (T1078.004)](https://attack.mitre.org/techniques/T1078/004/) | Every step - the original sign-in and the later hijacked access - used the same licensed cloud identity, `aitm-target@schnitz.onmicrosoft.com`. | Entra sign-in logs; Advanced Hunting session-ID correlation |
+ 
+The gap in the "Detected By" column for T1557 and T1539 is itself a useful finding: the reverse-proxy and cookie-theft steps happen entirely on infrastructure the defender doesn't control, so they generate no telemetry in the tenant. Everything that *was* detected came from the account's identity being reused afterwards (T1550.004) - which is exactly why session-based defences and phishing-resistant MFA are equally as important as detecting the phishing attempt itself.
 
 ---
 
@@ -374,6 +440,7 @@ The resulting authentication details were the strongest validation of the defenc
 - The session then reached the stronger MFA requirement.
 - Authentication did **not** satisfy the required phishing-resistant authentication strength.
 - The sign-in required the registered passkey/security key instead.
+- The Policy Impact page showed that policy controls were not met, meaning that the Conditional Access policy was not satisfied.
 
 ![Phishing-Resistant Authentication Result](images/passkey-blocked-signin-1.png)
 ![Phishing-Resistant Authentication Result](images/passkey-blocked-signin-2.png)
