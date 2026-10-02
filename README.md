@@ -28,6 +28,7 @@
   - [Investigation Timeline](#investigation-timeline)
   - [Mock Analyst Assessment](#mock-analyst-assessment)
   - [MITRE ATT&CK Mapping](#mitre-attck-mapping)
+  - [Custom Detection Rules](#custom-detection-rules)
 - [7. Passkey Defence](#7-passkey-defence)
   - [Re-testing the authentication flow](#re-testing-the-authentication-flow)
 - [Results](#results)
@@ -419,6 +420,137 @@ Because this was a controlled lab, the real method (Evilginx cookie theft) was a
 | Initial Access, Persistence, Privilege Escalation, Defense Evasion | [Valid Accounts: Cloud Accounts (T1078.004)](https://attack.mitre.org/techniques/T1078/004/) | Every step - the original sign-in and the later hijacked access - used the same licensed cloud identity, `aitm-target@schnitz.onmicrosoft.com`. | Entra sign-in logs; Advanced Hunting session-ID correlation |
  
 The gap in the "Detected By" column for T1557 and T1539 is itself a useful finding: the reverse-proxy and cookie-theft steps happen entirely on infrastructure the defender doesn't control, so they generate no telemetry in the tenant. Everything that *was* detected came from the account's identity being reused afterwards (T1550.004) - which is exactly why session-based defences and phishing-resistant MFA are equally as important as detecting the phishing attempt itself.
+
+### Custom Detection Rules
+
+After using Advanced Hunting to investigate suspicious authentication activity, I created two Microsoft Defender XDR custom detection rules to explore how hunting logic could be converted into proactive detections.
+
+#### Initial Rule - Session Observed from Multiple IP Addresses
+
+The first rule detected cases where the same Entra ID `SessionId` was observed from more than one source IP address.
+
+<details>
+  <summary>Click to expand code for the first detection rule </summary>
+
+```kusto
+EntraIdSignInEvents
+| where isnotempty(SessionId)
+| summarize
+    (Timestamp, ReportId, RequestId, IPAddress, Country, Application)
+        = arg_max(Timestamp, ReportId, RequestId, IPAddress, Country, Application),
+    IPs = make_set(IPAddress),
+    Countries = make_set(Country),
+    Apps = make_set(Application),
+    SignInCount = count()
+    by SessionId, AccountObjectId, AccountUpn
+| where array_length(IPs) > 1
+| project
+    Timestamp,
+    ReportId,
+    AccountObjectId,
+    AccountUpn,
+    SessionId,
+    RequestId,
+    IPAddress,
+    Country,
+    Application,
+    IPs,
+    Countries,
+    Apps,
+    SignInCount
+```
+
+</details>
+
+
+The intention was to identify behaviour consistent with authenticated session reuse, similar to what occurred during the controlled AiTM exercise.
+
+Although the rule successfully identified the lab session-replay activity, it was too broad and generated a large number of false positives. Investigation showed that legitimate sessions could also appear from multiple addresses due to normal network changes, including transitions between IPv4 and IPv6.
+
+![Initial custom detection rule results](images/custom-detection-v1.png)
+
+This demonstrated that a change in source IP alone was too weak a signal to use as a reliable indicator of session compromise.
+
+#### Tuned Rule - Cross-Country Session Reuse with Context Change
+
+To improve the detection quality, I created a second rule. Instead of solely alerting on every session observed from multiple IP addresses, the new rule required the same authenticated session to be observed from **more than one country**, together with an additional change in device, network or identity-risk context.
+
+<details>
+  <summary>Click to expand code for the second, focussed detection rule </summary>
+
+```kusto
+EntraIdSignInEvents
+| where isnotempty(SessionId)
+| extend IPVersion = iff(IPAddress contains ":", "IPv6", "IPv4")
+| summarize
+    arg_max(
+        Timestamp,
+        ReportId,
+        RequestId,
+        IPAddress,
+        Country,
+        City,
+        Application,
+        UserAgent,
+        EntraIdDeviceId,
+        IsManaged,
+        GatewayJA4,
+        RiskEventTypes,
+        RiskLevelAggregated
+    ),
+    IPs = make_set(IPAddress),
+    IPVersions = make_set(IPVersion),
+    Countries = make_set_if(Country, isnotempty(Country)),
+    Cities = make_set_if(City, isnotempty(City)),
+    UserAgents = make_set_if(UserAgent, isnotempty(UserAgent)),
+    DeviceIds = make_set_if(EntraIdDeviceId, isnotempty(EntraIdDeviceId)),
+    ManagedStates = make_set(IsManaged),
+    JA4s = make_set_if(GatewayJA4, isnotempty(GatewayJA4)),
+    RiskEvents = make_set_if(RiskEventTypes, isnotempty(RiskEventTypes)),
+    MaxRisk = max(RiskLevelAggregated),
+    SignInCount = count()
+    by SessionId, AccountObjectId, AccountUpn
+| extend ContextChanges =
+      iff(array_length(DeviceIds) > 1, 1, 0)
+    + iff(array_length(ManagedStates) > 1, 1, 0)
+    + iff(array_length(JA4s) > 1, 1, 0)
+| where array_length(Countries) > 1
+| where ContextChanges >= 1 or MaxRisk >= 50
+| project
+    Timestamp,
+    ReportId,
+    AccountObjectId,
+    AccountUpn,
+    SessionId,
+    RequestId,
+    IPAddress,
+    Country,
+    City,
+    Application,
+    IPs,
+    IPVersions,
+    Countries,
+    Cities,
+    DeviceIds,
+    ManagedStates,
+    JA4s,
+    RiskEvents,
+    MaxRisk,
+    SignInCount,
+    ContextChanges
+```
+
+</details>
+
+The rule incorporated additional telemetry such as device identifiers, managed-device state, network characteristics and Entra risk information. This allowed common IP-address changes to be filtered out while retaining activity that was more consistent with suspicious session reuse.
+
+The generated alert included the affected user and related IP address as mapped entities, with additional context such as the session ID, observed IP addresses, countries, device information, risk events, sign-in count and request ID.
+
+No automated response actions were configured because legitimate VPN use, roaming or other network changes can still produce unusual geographic behaviour. The rule was therefore designed to create an investigation opportunity rather than automatically treating the account as compromised.
+
+The new detection rule returned only the illegitimate sign-ins, without any false positives.  
+
+![Narrowed detection rule results](images/custom-detection-v2.png)
 
 ---
 
